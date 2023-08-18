@@ -1,5 +1,6 @@
 import calendar
 import datetime as dtm
+from collections import defaultdict
 from collections.abc import Collection, Iterable
 from enum import IntEnum
 from pathlib import Path
@@ -11,10 +12,10 @@ from xlsxwriter import utility as utils
 from xlsxwriter.format import Format
 from xlsxwriter.worksheet import Worksheet
 
-from holidayexcel.colors import BATLOW_S_HEX
+from holidayexcel.colors import BATLOW_S_HEX, GRAY_SCALES
 from holidayexcel.enums import StateCode
 from holidayexcel.holidays import BaseHoliday, PublicHoliday, SchoolHoliday
-from holidayexcel.utils.datetime import date_range, day_of_year
+from holidayexcel.utils.datetime import date_range, day_of_year, truncate_to_year
 
 calendar.setfirstweekday(calendar.MONDAY)
 
@@ -51,6 +52,7 @@ class RowNumbers(IntEnum):
     MONTH_NAMES = 0
     WEEK_NUMBERS = 1
     DAY_NUMBERS = 2
+    HOLIDAY_COUNT = 3
 
 
 class YearCalendar:
@@ -69,6 +71,19 @@ class YearCalendar:
         self._year: int = year
         self._workbook: Workbook = Workbook(str(self._path))
         self._worksheet = self.workbook.add_worksheet()
+
+        self._state_row_numbers: dict[StateCode, int] = {}
+        row = max(RowNumbers) + 1
+        for state_code in StateCode:
+            if state_code is StateCode.NATIONAL:
+                continue
+
+            self._state_row_numbers[state_code] = row
+            row += 1
+
+        self._holiday_count: dict[dtm.date, set[StateCode]] = defaultdict(set)
+
+        # cell formats:
         self._month_format = self.workbook.add_format(_MONTH_FORMAT)
         self._day_format = self.workbook.add_format(_DAY_FORMAT)
         self._school_holiday_format = self.workbook.add_format(_SCHOOL_HOLIDAY_FORMAT)
@@ -80,15 +95,15 @@ class YearCalendar:
         self._saturday_day_format.set_fg_color(self._saturday_format.fg_color)
         self._sunday_day_format = self.workbook.add_format(_DAY_FORMAT)
         self._sunday_day_format.set_fg_color(self._sunday_format.fg_color)
-
-        self._state_row_numbers: dict[StateCode, int] = {}
-        row = max(RowNumbers) + 1
-        for state_code in StateCode:
-            if state_code is StateCode.NATIONAL:
-                continue
-
-            self._state_row_numbers[state_code] = row
-            row += 1
+        self._holiday_count_formats: dict[int, Format] = {
+            count: self.workbook.add_format(
+                {
+                    "fg_color": color,
+                    "bottom": 1,
+                }
+            )
+            for count, color in enumerate(GRAY_SCALES)
+        }
 
     @property
     def workbook(self) -> Workbook:
@@ -130,7 +145,7 @@ class YearCalendar:
         # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
         self.shutdown()
 
-    def write_day(
+    def write_holiday(
         self,
         cell_format: Format,
         *,
@@ -138,6 +153,7 @@ class YearCalendar:
         start_date: dtm.date | None = None,
         end_date: dtm.date | None = None,
         national: bool = False,
+        holiday_count: bool = True,
     ) -> None:
         if not ((holiday is None) ^ ((start_date is None) and (end_date is None))):
             raise ValueError("Either holiday xor (start_date and end_date) must be given.")
@@ -147,7 +163,13 @@ class YearCalendar:
         effective_start_date = holiday.start_date if holiday else start_date
         effective_end_date = holiday.end_date if holiday else end_date
 
-        for date in date_range(effective_start_date, effective_end_date):  # type: ignore[arg-type]
+        for date in date_range(
+            truncate_to_year(effective_start_date, self.year),  # type: ignore[arg-type]
+            truncate_to_year(effective_end_date, self.year),  # type: ignore[arg-type]
+        ):
+            if holiday_count and holiday:
+                self._holiday_count[date].add(holiday.state_code)
+
             if national:
                 cells: Iterable[str] = (
                     utils.xl_rowcol_to_cell(row, day_of_year(date))
@@ -168,10 +190,13 @@ class YearCalendar:
         cell_format: Format,
         holidays: Iterable[BaseHoliday],
         national: bool = False,
+        holiday_count: bool = True,
     ) -> None:
         # Print the holidays
         for holiday in holidays:
-            self.write_day(cell_format, holiday=holiday, national=national)
+            self.write_holiday(
+                cell_format, holiday=holiday, national=national, holiday_count=holiday_count
+            )
 
     def write_week_numbers(self) -> None:
         # Print the week numbers
@@ -184,8 +209,8 @@ class YearCalendar:
                 if week.monday() > last_date_of_year or week.sunday() < first_date_of_year:
                     continue
 
-                first_col = day_of_year(max(first_date_of_year, week.monday()))
-                last_col = day_of_year(min(last_date_of_year, week.sunday()))
+                first_col = day_of_year(truncate_to_year(week.monday(), self.year))
+                last_col = day_of_year(truncate_to_year(week.sunday(), self.year))
 
                 if first_col == last_col:
                     self.worksheet.write(
@@ -222,11 +247,8 @@ class YearCalendar:
             cell_format = (
                 self._saturday_format if weekday == calendar.SATURDAY else self._sunday_format
             )
-            self.write_day(
-                cell_format,
-                start_date=date,
-                end_date=date,
-                national=True,
+            self.write_holiday(
+                cell_format, start_date=date, end_date=date, national=True, holiday_count=False
             )
 
     def write_month_names(self) -> None:
@@ -256,6 +278,15 @@ class YearCalendar:
             cell = utils.xl_rowcol_to_cell(self._state_row_numbers[state_code], 0)
             self.worksheet.write(cell, state_code.state_name)
 
+    def write_holiday_count(self) -> None:
+        # Print the holiday count
+        # Must be called after all holidays have been written as the holiday count is incremented
+        # when writing holidays
+        for date in date_range(dtm.date(self.year, 1, 1), dtm.date(self.year, 12, 31)):
+            cell = utils.xl_rowcol_to_cell(RowNumbers.HOLIDAY_COUNT, day_of_year(date))
+            value = min(16, len(self._holiday_count[date]))
+            self.worksheet.write(cell, str(value), self._holiday_count_formats[value])
+
     def write_year(self) -> None:
         # Order matters here, because we overwrite the cells in each call
         self.write_state_names()
@@ -269,3 +300,5 @@ class YearCalendar:
             self._national_holidays,
             national=True,
         )
+        # Must be called after all holidays have been written
+        self.write_holiday_count()

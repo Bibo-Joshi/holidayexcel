@@ -203,3 +203,5 @@ BATLOW_S_HEX = [
     "#33695A",
     "#FCBED1",
 ]
+
+GRAY_SCALES = [f"#{x:02x}{x:02x}{x:02x}" for x in reversed(range(0, 256, 15))]

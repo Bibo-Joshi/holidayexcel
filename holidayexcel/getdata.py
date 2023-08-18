@@ -29,7 +29,7 @@ def get_public_holidays(year: int | None = None) -> Iterable[PublicHoliday]:
         for name, entry in entries.items():
             if (
                 holiday := PublicHoliday.de_json(state_code=state, data=entry, name=name)
-            ).year == effective_year:
+            ).years == effective_year:
                 yield holiday
 
 
@@ -37,7 +37,7 @@ def get_school_holidays(year: int | None = None) -> Iterable[SchoolHoliday]:
     effective_year = year or dtm.date.today().year
 
     for entry in get_json_data(holiday_type=HolidayType.SCHOOL, year=effective_year):
-        if (holiday := SchoolHoliday.de_json(entry)).year == effective_year:
+        if effective_year in (holiday := SchoolHoliday.de_json(entry)).years:
             yield holiday
 
 

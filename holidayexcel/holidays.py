@@ -1,6 +1,7 @@
 import datetime as dtm
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import TypeVar
 
 from holidayexcel.enums import StateCode
@@ -13,6 +14,7 @@ class BaseHoliday(ABC):
         self._start_date: dtm.date = start_date
         self._end_date: dtm.date = end_date
         self._state_code: StateCode = state_code
+        self._years: Collection[int] = set(range(start_date.year, end_date.year + 1))
 
     @property
     def start_date(self) -> dtm.date:
@@ -27,8 +29,8 @@ class BaseHoliday(ABC):
         return self._state_code
 
     @property
-    def year(self) -> int:
-        return self.start_date.year
+    def years(self) -> Collection[int]:
+        return self._years
 
     @property
     @abstractmethod
