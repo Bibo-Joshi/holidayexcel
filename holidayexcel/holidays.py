@@ -8,8 +8,13 @@ from typing import Literal
 
 from holidayexcel.enums import CountryCode
 from holidayexcel.enums import HolidayType as EnumHolidayType
-from holidayexcel.getdata import get_all_holidays_by_date, get_countries, get_subdivisions
-from holidayexcel.openholidaysapi import CountryResponse, HolidayType, SubdivisionResponse
+from holidayexcel.getdata import get_all_holidays, get_countries, get_subdivisions
+from holidayexcel.openholidaysapi import (
+    CountryResponse,
+    HolidayResponse,
+    HolidayType,
+    SubdivisionResponse,
+)
 from holidayexcel.utils.collections import scn_to_set
 from holidayexcel.utils.datetime import date_range
 
@@ -55,7 +60,8 @@ class HolidayDate:
         subdivisions: SubdivisionResponse | Collection[SubdivisionResponse] | None = None,
         nation_wide: Literal[True] | None = None,
     ) -> None:
-        if not (subdivisions is None) ^ (nation_wide is False):
+        if not (subdivisions is not None) ^ (nation_wide is True):
+            print(nation_wide, type(subdivisions))
             raise ValueError("Either subdivisions xor nation_wide must be specified.")
         if nation_wide is True:
             self._country_codes[country_code] = True
@@ -76,16 +82,15 @@ class HolidayDate:
 
     def get_count_for_country(self, country_code: CountryCode, number_of_subdivisions: int) -> int:
         if (entry := self._country_codes.get(country_code, set())) is True:
-            return number_of_subdivisions
+            return number_of_subdivisions or 1
 
         return len(entry)
 
     def get_percentage_for_country(
         self, country_code: CountryCode, number_of_subdivisions: int
     ) -> float:
-        return (
-            self.get_count_for_country(country_code, number_of_subdivisions)
-            / number_of_subdivisions
+        return self.get_count_for_country(country_code, number_of_subdivisions) / (
+            number_of_subdivisions or 1
         )
 
 
@@ -94,59 +99,54 @@ class HolidayYear:
         self, year: int, country_code: CountryCode | Collection[CountryCode] = CountryCode.GERMANY
     ):
         self._year = year
-        self._dates: dict[dtm.date, HolidayDate] = {}
+        self._dates: dict[dtm.date, HolidayDate] = {
+            date: HolidayDate(date)
+            for date in date_range(dtm.date(self.year, 1, 1), dtm.date(self.year, 12, 31))
+        }
         self._country_codes: set[CountryCode] = scn_to_set(country_code)
         self._subdivisions: dict[CountryCode, dict[str, SubdivisionResponse]] = defaultdict(dict)
         self._country_code_mapping: dict[CountryCode, CountryResponse] = {}
 
-    async def initialize(self) -> None:
-        await asyncio.gather(
-            *(self._get_subdivisions(country_code) for country_code in self._country_codes),
-            self._get_countries(),
+    def _parse_holiday_response(
+        self, country_code: str, holiday_response: HolidayResponse
+    ) -> None:
+        subdivisions = (
+            {
+                self._subdivisions[CountryCode(country_code)][subdivision_ref.code]
+                for subdivision_ref in holiday_response.subdivisions
+            }
+            if holiday_response.subdivisions
+            else None
         )
-
-        days_in_year = tuple(date_range(dtm.date(self._year, 1, 1), dtm.date(self._year, 12, 31)))
-        holiday_by_date_responses = await asyncio.gather(
-            *(
-                get_all_holidays_by_date(date=date, country_code=self._country_codes)
-                for date in days_in_year
+        for date in date_range(
+            holiday_response.start_date, holiday_response.end_date, limit_to_year=self.year
+        ):
+            self._dates[date].add_country_code(
+                CountryCode(country_code),
+                subdivisions=subdivisions,
+                nation_wide=holiday_response.nationwide or None,
             )
-        )
-        for date in days_in_year:
-            self._dates[date] = HolidayDate(date)
+            if holiday_response.type in (
+                HolidayType.SCHOOL,
+                HolidayType.BACK_TO_SCHOOL,
+                HolidayType.END_OF_LESSONS,
+            ):
+                for subdivision_ref in holiday_response.subdivisions:
+                    self._dates[date].add_holiday_type(
+                        subdivision_code=subdivision_ref.code,
+                        holiday_type=EnumHolidayType.SCHOOL,
+                    )
+            if holiday_response.type in (HolidayType.BANK, HolidayType.PUBLIC):
+                for subdivision_ref in holiday_response.subdivisions:
+                    self._dates[date].add_holiday_type(
+                        subdivision_code=subdivision_ref.code,
+                        holiday_type=EnumHolidayType.PUBLIC,
+                    )
 
-        for number, date in enumerate(days_in_year):
-            for holiday_by_date_response in holiday_by_date_responses[number]:
-                country_code = CountryCode(holiday_by_date_response.country.iso_code)
-                subdivisions = (
-                    {
-                        self._subdivisions[country_code][subdivision_ref.code]
-                        for subdivision_ref in holiday_by_date_response.subdivisions
-                    }
-                    if holiday_by_date_response.subdivisions
-                    else None
-                )
-                self._dates[date].add_country_code(
-                    country_code,
-                    subdivisions=subdivisions,
-                    nation_wide=holiday_by_date_response.nationwide,
-                )
-                if holiday_by_date_response.type in (
-                    HolidayType.SCHOOL,
-                    HolidayType.BACK_TO_SCHOOL,
-                    HolidayType.END_OF_LESSONS,
-                ):
-                    for subdivision_ref in holiday_by_date_response.subdivisions:
-                        self._dates[date].add_holiday_type(
-                            subdivision_code=subdivision_ref.code,
-                            holiday_type=EnumHolidayType.SCHOOL,
-                        )
-                if holiday_by_date_response.type in (HolidayType.BANK, HolidayType.PUBLIC):
-                    for subdivision_ref in holiday_by_date_response.subdivisions:
-                        self._dates[date].add_holiday_type(
-                            subdivision_code=subdivision_ref.code,
-                            holiday_type=EnumHolidayType.PUBLIC,
-                        )
+    async def _get_all_holidays(self, country_code: CountryCode) -> None:
+        holiday_responses = await get_all_holidays(country_code=country_code, year=self.year)
+        for holiday_response in holiday_responses:
+            self._parse_holiday_response(country_code, holiday_response)
 
     async def _get_subdivisions(self, country_code: CountryCode) -> None:
         def _parse_subdivisions(subdivisions: tuple[SubdivisionResponse, ...]) -> None:
@@ -156,6 +156,7 @@ class HolidayYear:
                     _parse_subdivisions(subdivision.children)
 
         results = await get_subdivisions(country_code)
+        self._subdivisions.setdefault(country_code, {})
         _parse_subdivisions(results)
 
     async def _get_countries(self) -> None:
@@ -163,6 +164,21 @@ class HolidayYear:
         for country in results:
             if country.iso_code in self._country_codes:
                 self._country_code_mapping[CountryCode(country.iso_code)] = country
+
+    async def initialize(self) -> None:
+        await asyncio.gather(
+            *(self._get_subdivisions(country_code) for country_code in self._country_codes),
+            self._get_countries(),
+        )
+
+        # Don't merge with the above gather, as we want to wait for the countries to be fetched
+        # before we start fetching the holidays.
+        await asyncio.gather(
+            *(
+                self._get_all_holidays(country_code=country_code)
+                for country_code in self._country_codes
+            )
+        )
 
     async def shutdown(self) -> None:
         pass

@@ -74,7 +74,10 @@ class YearCalendar:
             row += 1
 
         row += 1
-        for code in subdivisions:
+        for code in sorted(
+            subdivisions,
+            key=lambda code: self._holiday_year.country_codes[code].get_name(CountryCode.GERMANY),
+        ):
             if code == CountryCode.GERMANY:
                 continue
             self._state_row_numbers[code] = (row, holiday_year.country_codes[code])
