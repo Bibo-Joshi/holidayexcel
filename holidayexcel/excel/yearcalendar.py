@@ -3,23 +3,18 @@ import datetime as dtm
 from collections.abc import Collection
 from enum import IntEnum
 from pathlib import Path
-from types import TracebackType
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from isoweek import Week
 from xlsxwriter import Workbook
 from xlsxwriter import utility as utils
-from xlsxwriter.format import Format
-from xlsxwriter.worksheet import Worksheet
 
-from holidayexcel.colors import BATLOW_S_HEX, get_gray_scale_color
+from holidayexcel.colors import BATLOW_S_HEX
 from holidayexcel.enums import CountryCode, HolidayType
+from holidayexcel.excel.excelbase import ExcelBase
 from holidayexcel.holidays import HolidayDate, HolidayYear
-from holidayexcel.openholidaysapi import SubdivisionResponse
+from holidayexcel.openholidaysapi import CountryResponse, SubdivisionResponse
 from holidayexcel.utils.datetime import day_of_year, truncate_to_year
-
-if TYPE_CHECKING:
-    from holidayexcel.openholidaysapi import CountryResponse
 
 calendar.setfirstweekday(calendar.MONDAY)
 
@@ -44,27 +39,27 @@ _WEEKEND_FORMAT = {
 }
 
 
-class RowNumbers(IntEnum):
+class _RowNumbers(IntEnum):
     MONTH_NAMES = 0
     WEEK_NUMBERS = 1
     DAY_NUMBERS = 2
     HOLIDAY_COUNT = 3
 
 
-class YearCalendar:
+class YearCalendar(ExcelBase):
     def __init__(
         self,
         holiday_year: HolidayYear,
-        path: Path,
+        *,
+        path: Path | None = None,
+        workbook: Workbook | None = None,
+        worksheet_name: str | None = None,
     ) -> None:
-        self._holiday_year: HolidayYear = holiday_year
-        self._path: Path = path
-        self._workbook: Workbook = Workbook(str(self._path))
-        self._worksheet = self.workbook.add_worksheet()
+        super().__init__(holiday_year, path=path, workbook=workbook, worksheet_name=worksheet_name)
 
         self._state_row_numbers: dict[str, tuple[int, SubdivisionResponse | CountryResponse]] = {}
         subdivisions = self._holiday_year.subdivisions
-        row = max(RowNumbers) + 1
+        row = max(_RowNumbers) + 1
         sorted_subdivisions = sorted(
             subdivisions[CountryCode.GERMANY].items(),
             key=lambda item: item[1].get_name(CountryCode.GERMANY),
@@ -91,51 +86,6 @@ class YearCalendar:
         self._weekend_format = self.workbook.add_format(_WEEKEND_FORMAT)
         self._weekend_day_format = self.workbook.add_format(_DAY_FORMAT)
         self._weekend_day_format.set_fg_color(self._weekend_format.fg_color)
-        self._holiday_count_formats: dict[str, Format] = {}
-
-    @property
-    def workbook(self) -> Workbook:
-        return self._workbook
-
-    @property
-    def worksheet(self) -> Worksheet:
-        return self._worksheet
-
-    @property
-    def year(self) -> int:
-        return self.holiday_year.year
-
-    @property
-    def path(self) -> Path:
-        return self._path
-
-    @property
-    def holiday_year(self) -> HolidayYear:
-        return self._holiday_year
-
-    def initialize(self) -> None:
-        self.path.unlink(missing_ok=True)
-
-    def shutdown(self) -> None:
-        self._workbook.close()
-
-    def __enter__(self: "YearCalendar") -> "YearCalendar":
-        try:
-            self.initialize()
-            return self
-        except Exception as exc:
-            self.shutdown()
-            raise exc
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        # Make sure not to return `True` so that exceptions are not suppressed
-        # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
-        self.shutdown()
 
     def write_weekend_day(self, column: int) -> None:
         cell_format = self._weekend_format
@@ -146,7 +96,7 @@ class YearCalendar:
         for cell in cells:
             self.worksheet.write(cell, "", cell_format)
 
-    def _write_holiday_date_germany(
+    def write_holiday_date_germany(
         self,
         holiday_date: HolidayDate,
         column: int,
@@ -172,7 +122,7 @@ class YearCalendar:
                 cell = utils.xl_rowcol_to_cell(self._state_row_numbers[code][0], column)
                 self.worksheet.write(cell, "", cell_format)
 
-    def _write_holiday_date(
+    def write_holiday_date_foreign(
         self, column: int, country_code: CountryCode, holiday_date: HolidayDate
     ) -> None:
         # Print the holiday day
@@ -183,26 +133,14 @@ class YearCalendar:
         cell_format = self._get_gray_scale_format(percentage)
         self.worksheet.write(cell, "", cell_format)
 
-    def _get_gray_scale_format(self, percentage: float) -> Format:
-        colour = get_gray_scale_color(percentage)
-        if colour not in self._holiday_count_formats:
-            cell_format = self.workbook.add_format({"fg_color": colour, "font_color": "white"})
-            self._holiday_count_formats[colour] = cell_format
-        return self._holiday_count_formats[colour]
-
     def write_holiday_date(self, holiday_date: HolidayDate) -> None:
         # Print the holiday day
         column = day_of_year(holiday_date.date)
         for country_code, value in holiday_date.country_codes.items():
             if country_code == CountryCode.GERMANY:
-                self._write_holiday_date_germany(holiday_date, column, value)
+                self.write_holiday_date_germany(holiday_date, column, value)
             else:
-                self._write_holiday_date(column, country_code, holiday_date)
-
-    def write_holiday_dates(self) -> None:
-        # Print the holiday days
-        for holiday_date in self.holiday_year.iter():
-            self.write_holiday_date(holiday_date)
+                self.write_holiday_date_foreign(column, country_code, holiday_date)
 
     def write_week_numbers(self) -> None:
         # Print the week numbers
@@ -220,15 +158,15 @@ class YearCalendar:
 
                 if first_col == last_col:
                     self.worksheet.write(
-                        utils.xl_rowcol_to_cell(RowNumbers.WEEK_NUMBERS, first_col),
+                        utils.xl_rowcol_to_cell(_RowNumbers.WEEK_NUMBERS, first_col),
                         str(week.week),
                         self._month_format,
                     )
                     continue
 
                 self.worksheet.merge_range(
-                    first_row=RowNumbers.WEEK_NUMBERS,
-                    last_row=RowNumbers.WEEK_NUMBERS,
+                    first_row=_RowNumbers.WEEK_NUMBERS,
+                    last_row=_RowNumbers.WEEK_NUMBERS,
                     first_col=first_col,
                     last_col=last_col,
                     data=str(week.week),
@@ -240,7 +178,7 @@ class YearCalendar:
         for holiday_date in self.holiday_year.iter():
             date = holiday_date.date
             int_column = day_of_year(date)
-            cell = utils.xl_rowcol_to_cell(RowNumbers.DAY_NUMBERS, int_column)
+            cell = utils.xl_rowcol_to_cell(_RowNumbers.DAY_NUMBERS, int_column)
             weekday = calendar.weekday(self.year, date.month, date.day)
             cell_format = (
                 self._weekend_day_format
@@ -253,15 +191,14 @@ class YearCalendar:
                 self.write_weekend_day(int_column)
 
     def write_month_names(self) -> None:
-        # Print the year
         offset = 1
         for month in range(1, 13):
             number_days = calendar.monthrange(self.year, month)[1]
 
             # Print the month name
             self.worksheet.merge_range(
-                first_row=RowNumbers.MONTH_NAMES,
-                last_row=RowNumbers.MONTH_NAMES,
+                first_row=_RowNumbers.MONTH_NAMES,
+                last_row=_RowNumbers.MONTH_NAMES,
                 first_col=offset,
                 last_col=offset + number_days - 1,
                 data=str(calendar.month_name[month]),
@@ -286,7 +223,7 @@ class YearCalendar:
         # Print the holiday count
         for holiday_date in self.holiday_year.iter():
             date = holiday_date.date
-            cell = utils.xl_rowcol_to_cell(RowNumbers.HOLIDAY_COUNT, day_of_year(date))
+            cell = utils.xl_rowcol_to_cell(_RowNumbers.HOLIDAY_COUNT, day_of_year(date))
             value = self.holiday_year.get_count_for_country_and_date(
                 country_code=CountryCode.GERMANY, date=date
             )
@@ -304,4 +241,4 @@ class YearCalendar:
         self.write_holiday_count_germany()
         self.write_holiday_dates()
         self.worksheet.set_column(1, 1 + day_of_year(dtm.date(self.year, 12, 31)), 2)
-        self.worksheet.freeze_panes(max(RowNumbers) + 1, 1)
+        self.worksheet.freeze_panes(max(_RowNumbers) + 1, 1)
