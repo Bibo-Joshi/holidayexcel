@@ -13,3 +13,22 @@ show-fixes = true
 ignore = ["PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PERF203"]
 select = ["E", "F", "I", "PL", "UP", "RUF", "PTH", "C4", "B", "PIE", "SIM", "RET", "RSE",
           "G", "ISC", "PT", "ASYNC", "TCH", "CPY", "SLOT", "PERF", "PYI"]
+
+[tool.datamodel-codegen]
+allow-extra-fields = true
+capitalise-enum-members = true
+colllapse-root-models = true
+field-constraints = true
+input-file-type = "openapi"
+output = "holidayexcel/openholidaysapi.py"
+output-model-type = "pydantic_v2.BaseModel"
+reuse-model = true
+snake-case-field = true
+target-python-version = "3.11"
+url = "https://openholidaysapi.org/swagger/v1/swagger.json"
+use-double-quotes = true
+use-field-description = true
+use-non-positive-negative-number-constrained-types = true
+use-union-operator = true
+validation = true
+#wrap-string-literal = true

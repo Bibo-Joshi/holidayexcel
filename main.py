@@ -1,21 +1,27 @@
+import asyncio
+import pickle
 from pathlib import Path
 
+# from holidayexcel.enums import CountryCode
 from holidayexcel.excel import YearCalendar
-from holidayexcel.getdata import get_all_holidays
+
+# from holidayexcel.holidays import HolidayYear
 
 
-def main() -> None:
-    year = 2023
-    national_holidays, state_holidays, school_holidays = get_all_holidays(year=year)
-    with YearCalendar(
-        national_holidays=national_holidays,
-        state_holidays=state_holidays,
-        school_holidays=school_holidays,
-        path=Path("holidays.xlsx"),
-        year=year,
-    ) as calendar:
-        calendar.write_year()
+async def main() -> None:
+    # country_codes = (
+    #     CountryCode.GERMANY,
+    #     CountryCode.AUSTRIA,
+    #     CountryCode.SWITZERLAND,
+    #     CountryCode.FRANCE,
+    # )
+    # async with HolidayYear(year=2024, country_code=country_codes) as holiday_year:
+    #     pickle.dump(holiday_year, Path("holiday_year.pickle").open("wb"))
+    with Path("holiday_year.pickle").open("rb") as file:
+        holiday_year = pickle.load(file)
+        with YearCalendar(holiday_year=holiday_year, path=Path("holidays.xlsx")) as year_calendar:
+            year_calendar.write_year()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

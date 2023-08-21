@@ -1,10 +1,10 @@
 import calendar
 import datetime as dtm
-from collections import defaultdict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection
 from enum import IntEnum
 from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING, Literal
 
 from isoweek import Week
 from xlsxwriter import Workbook
@@ -12,10 +12,14 @@ from xlsxwriter import utility as utils
 from xlsxwriter.format import Format
 from xlsxwriter.worksheet import Worksheet
 
-from holidayexcel.colors import BATLOW_S_HEX, GRAY_SCALES
-from holidayexcel.enums import StateCode
-from holidayexcel.holidays import BaseHoliday, PublicHoliday, SchoolHoliday
-from holidayexcel.utils.datetime import date_range, day_of_year, truncate_to_year
+from holidayexcel.colors import BATLOW_S_HEX, get_gray_scale_color
+from holidayexcel.enums import CountryCode, HolidayType
+from holidayexcel.holidays import HolidayDate, HolidayYear
+from holidayexcel.openholidaysapi import SubdivisionResponse
+from holidayexcel.utils.datetime import day_of_year, truncate_to_year
+
+if TYPE_CHECKING:
+    from holidayexcel.openholidaysapi import CountryResponse
 
 calendar.setfirstweekday(calendar.MONDAY)
 
@@ -35,16 +39,8 @@ _SCHOOL_HOLIDAY_FORMAT = {
 _PUBLIC_HOLIDAY_FORMAT = {
     "fg_color": BATLOW_S_HEX[1],
 }
-_NATIONAL_HOLIDAY_FORMAT = {
+_WEEKEND_FORMAT = {
     "fg_color": BATLOW_S_HEX[2],
-}
-_SATURDAY_FORMAT = {
-    "fg_color": BATLOW_S_HEX[3],
-    "left": 1,
-}
-_SUNDAY_FORMAT = {
-    "fg_color": BATLOW_S_HEX[3],
-    "right": 1,
 }
 
 
@@ -58,52 +54,41 @@ class RowNumbers(IntEnum):
 class YearCalendar:
     def __init__(
         self,
-        national_holidays: Iterable[PublicHoliday],
-        state_holidays: Iterable[PublicHoliday],
-        school_holidays: Iterable[SchoolHoliday],
+        holiday_year: HolidayYear,
         path: Path,
-        year: int,
     ) -> None:
-        self._national_holidays: Collection[PublicHoliday] = set(national_holidays)
-        self._state_holidays: Collection[PublicHoliday] = set(state_holidays)
-        self._school_holidays: Collection[SchoolHoliday] = set(school_holidays)
+        self._holiday_year: HolidayYear = holiday_year
         self._path: Path = path
-        self._year: int = year
         self._workbook: Workbook = Workbook(str(self._path))
         self._worksheet = self.workbook.add_worksheet()
 
-        self._state_row_numbers: dict[StateCode, int] = {}
+        self._state_row_numbers: dict[str, tuple[int, SubdivisionResponse | CountryResponse]] = {}
+        subdivisions = self._holiday_year.subdivisions
         row = max(RowNumbers) + 1
-        for state_code in StateCode:
-            if state_code is StateCode.NATIONAL:
-                continue
-
-            self._state_row_numbers[state_code] = row
+        sorted_subdivisions = sorted(
+            subdivisions[CountryCode.GERMANY].items(),
+            key=lambda item: item[1].get_name(CountryCode.GERMANY),
+        )
+        for code, subdivision in sorted_subdivisions:
+            self._state_row_numbers[code] = (row, subdivision)
             row += 1
 
-        self._holiday_count: dict[dtm.date, set[StateCode]] = defaultdict(set)
+        row += 1
+        for code in subdivisions:
+            if code == CountryCode.GERMANY:
+                continue
+            self._state_row_numbers[code] = (row, holiday_year.country_codes[code])
+            row += 1
 
         # cell formats:
         self._month_format = self.workbook.add_format(_MONTH_FORMAT)
         self._day_format = self.workbook.add_format(_DAY_FORMAT)
         self._school_holiday_format = self.workbook.add_format(_SCHOOL_HOLIDAY_FORMAT)
         self._public_holiday_format = self.workbook.add_format(_PUBLIC_HOLIDAY_FORMAT)
-        self._national_holiday_format = self.workbook.add_format(_NATIONAL_HOLIDAY_FORMAT)
-        self._saturday_format = self.workbook.add_format(_SATURDAY_FORMAT)
-        self._sunday_format = self.workbook.add_format(_SUNDAY_FORMAT)
-        self._saturday_day_format = self.workbook.add_format(_DAY_FORMAT)
-        self._saturday_day_format.set_fg_color(self._saturday_format.fg_color)
-        self._sunday_day_format = self.workbook.add_format(_DAY_FORMAT)
-        self._sunday_day_format.set_fg_color(self._sunday_format.fg_color)
-        self._holiday_count_formats: dict[int, Format] = {
-            count: self.workbook.add_format(
-                {
-                    "fg_color": color,
-                    "bottom": 1,
-                }
-            )
-            for count, color in enumerate(GRAY_SCALES)
-        }
+        self._weekend_format = self.workbook.add_format(_WEEKEND_FORMAT)
+        self._weekend_day_format = self.workbook.add_format(_DAY_FORMAT)
+        self._weekend_day_format.set_fg_color(self._weekend_format.fg_color)
+        self._holiday_count_formats: dict[str, Format] = {}
 
     @property
     def workbook(self) -> Workbook:
@@ -115,11 +100,15 @@ class YearCalendar:
 
     @property
     def year(self) -> int:
-        return self._year
+        return self.holiday_year.year
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def holiday_year(self) -> HolidayYear:
+        return self._holiday_year
 
     def initialize(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -145,58 +134,72 @@ class YearCalendar:
         # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
         self.shutdown()
 
-    def write_holiday(
+    def write_weekend_day(self, column: int) -> None:
+        cell_format = self._weekend_format
+        cells = (
+            utils.xl_rowcol_to_cell(entity[0], column)
+            for entity in self._state_row_numbers.values()
+        )
+        for cell in cells:
+            self.worksheet.write(cell, "", cell_format)
+
+    def _write_holiday_date_germany(
         self,
-        cell_format: Format,
-        *,
-        holiday: BaseHoliday | None = None,
-        start_date: dtm.date | None = None,
-        end_date: dtm.date | None = None,
-        national: bool = False,
-        holiday_count: bool = True,
+        holiday_date: HolidayDate,
+        column: int,
+        subdivisions: Literal[True] | Collection[SubdivisionResponse],
     ) -> None:
-        if not ((holiday is None) ^ ((start_date is None) and (end_date is None))):
-            raise ValueError("Either holiday xor (start_date and end_date) must be given.")
-        if holiday is None and national is False:
-            raise ValueError("If no holiday is given, national must be True.")
-
-        effective_start_date = holiday.start_date if holiday else start_date
-        effective_end_date = holiday.end_date if holiday else end_date
-
-        for date in date_range(
-            truncate_to_year(effective_start_date, self.year),  # type: ignore[arg-type]
-            truncate_to_year(effective_end_date, self.year),  # type: ignore[arg-type]
-        ):
-            if holiday_count and holiday:
-                self._holiday_count[date].add(holiday.state_code)
-
-            if national:
-                cells: Iterable[str] = (
-                    utils.xl_rowcol_to_cell(row, day_of_year(date))
-                    for row in self._state_row_numbers.values()
-                )
-            else:
-                cells = (
-                    utils.xl_rowcol_to_cell(
-                        self._state_row_numbers[holiday.state_code],  # type: ignore[union-attr]
-                        day_of_year(date),
-                    ),
-                )
+        if subdivisions is True:
+            cells: set[str] = {
+                utils.xl_rowcol_to_cell(self._state_row_numbers[subdivision][0], column)
+                for subdivision in self.holiday_year.subdivisions[CountryCode.GERMANY]
+            }
+            cell_format = self._public_holiday_format
             for cell in cells:
                 self.worksheet.write(cell, "", cell_format)
+        else:
+            for subdivision in subdivisions:
+                code = subdivision.code
+                holiday_types = holiday_date.holiday_type[code]
+                cell_format = (
+                    self._public_holiday_format
+                    if HolidayType.PUBLIC in holiday_types
+                    else self._school_holiday_format
+                )
+                cell = utils.xl_rowcol_to_cell(self._state_row_numbers[code][0], column)
+                self.worksheet.write(cell, "", cell_format)
 
-    def write_holidays(
-        self,
-        cell_format: Format,
-        holidays: Iterable[BaseHoliday],
-        national: bool = False,
-        holiday_count: bool = True,
+    def _write_holiday_date(
+        self, column: int, country_code: CountryCode, holiday_date: HolidayDate
     ) -> None:
-        # Print the holidays
-        for holiday in holidays:
-            self.write_holiday(
-                cell_format, holiday=holiday, national=national, holiday_count=holiday_count
-            )
+        # Print the holiday day
+        cell = utils.xl_rowcol_to_cell(self._state_row_numbers[country_code][0], column)
+        percentage = self.holiday_year.get_percentage_for_country_and_date(
+            country_code, holiday_date.date
+        )
+        cell_format = self._get_gray_scale_format(percentage)
+        self.worksheet.write(cell, "", cell_format)
+
+    def _get_gray_scale_format(self, percentage: float) -> Format:
+        colour = get_gray_scale_color(percentage)
+        if colour not in self._holiday_count_formats:
+            cell_format = self.workbook.add_format({"fg_color": colour, "font_color": "white"})
+            self._holiday_count_formats[colour] = cell_format
+        return self._holiday_count_formats[colour]
+
+    def write_holiday_date(self, holiday_date: HolidayDate) -> None:
+        # Print the holiday day
+        column = day_of_year(holiday_date.date)
+        for country_code, value in holiday_date.country_codes.items():
+            if country_code == CountryCode.GERMANY:
+                self._write_holiday_date_germany(holiday_date, column, value)
+            else:
+                self._write_holiday_date(column, country_code, holiday_date)
+
+    def write_holiday_dates(self) -> None:
+        # Print the holiday days
+        for holiday_date in self.holiday_year.iter():
+            self.write_holiday_date(holiday_date)
 
     def write_week_numbers(self) -> None:
         # Print the week numbers
@@ -231,25 +234,20 @@ class YearCalendar:
 
     def write_day_numbers(self) -> None:
         # Print the day numbers
-        for date in date_range(dtm.date(self.year, 1, 1), dtm.date(self.year, 12, 31)):
-            cell = utils.xl_rowcol_to_cell(RowNumbers.DAY_NUMBERS, day_of_year(date))
+        for holiday_date in self.holiday_year.iter():
+            date = holiday_date.date
+            int_column = day_of_year(date)
+            cell = utils.xl_rowcol_to_cell(RowNumbers.DAY_NUMBERS, int_column)
             weekday = calendar.weekday(self.year, date.month, date.day)
             cell_format = (
-                self._saturday_day_format
-                if weekday == calendar.SATURDAY
-                else (self._sunday_day_format if weekday == calendar.SUNDAY else self._day_format)
+                self._weekend_day_format
+                if weekday in (calendar.SATURDAY, calendar.SUNDAY)
+                else self._day_format
             )
             self.worksheet.write(cell, str(date.day), cell_format)
 
-            if weekday not in (calendar.SATURDAY, calendar.SUNDAY):
-                continue
-
-            cell_format = (
-                self._saturday_format if weekday == calendar.SATURDAY else self._sunday_format
-            )
-            self.write_holiday(
-                cell_format, start_date=date, end_date=date, national=True, holiday_count=False
-            )
+            if weekday in (calendar.SATURDAY, calendar.SUNDAY):
+                self.write_weekend_day(int_column)
 
     def write_month_names(self) -> None:
         # Print the year
@@ -269,36 +267,38 @@ class YearCalendar:
 
             offset += number_days
 
-    def write_state_names(self) -> None:
-        # Print the state names
-        for state_code in StateCode:
-            if state_code is StateCode.NATIONAL:
-                continue
+    def write_division_names(self) -> None:
+        # Print the division/country names
+        max_length = 0
+        for row, entity in self._state_row_numbers.values():
+            cell = utils.xl_rowcol_to_cell(row, 0)
 
-            cell = utils.xl_rowcol_to_cell(self._state_row_numbers[state_code], 0)
-            self.worksheet.write(cell, state_code.state_name)
+            name = entity.get_name(CountryCode.GERMANY)
+            max_length = max(max_length, len(name))
 
-    def write_holiday_count(self) -> None:
+            self.worksheet.write(cell, name)
+            self.worksheet.set_column(0, 0, max_length)
+
+    def write_holiday_count_germany(self) -> None:
         # Print the holiday count
-        # Must be called after all holidays have been written as the holiday count is incremented
-        # when writing holidays
-        for date in date_range(dtm.date(self.year, 1, 1), dtm.date(self.year, 12, 31)):
+        for holiday_date in self.holiday_year.iter():
+            date = holiday_date.date
             cell = utils.xl_rowcol_to_cell(RowNumbers.HOLIDAY_COUNT, day_of_year(date))
-            value = min(16, len(self._holiday_count[date]))
-            self.worksheet.write(cell, str(value), self._holiday_count_formats[value])
+            value = self.holiday_year.get_count_for_country_and_date(
+                country_code=CountryCode.GERMANY, date=date
+            )
+            percentage = self.holiday_year.get_percentage_for_country_and_date(
+                country_code=CountryCode.GERMANY, date=date
+            )
+            self.worksheet.write(cell, str(value), self._get_gray_scale_format(percentage))
 
     def write_year(self) -> None:
         # Order matters here, because we overwrite the cells in each call
-        self.write_state_names()
-        self.write_holidays(self._school_holiday_format, self._school_holidays)
+        self.write_division_names()
         self.write_month_names()
         self.write_day_numbers()
         self.write_week_numbers()
-        self.write_holidays(self._public_holiday_format, self._state_holidays)
-        self.write_holidays(
-            self._national_holiday_format,
-            self._national_holidays,
-            national=True,
-        )
-        # Must be called after all holidays have been written
-        self.write_holiday_count()
+        self.write_holiday_count_germany()
+        self.write_holiday_dates()
+        self.worksheet.set_column(1, 1 + day_of_year(dtm.date(self.year, 12, 31)), 2)
+        self.worksheet.freeze_panes(max(RowNumbers) + 1, 1)

@@ -204,4 +204,13 @@ BATLOW_S_HEX = [
     "#FCBED1",
 ]
 
-GRAY_SCALES = [f"#{x:02x}{x:02x}{x:02x}" for x in reversed(range(0, 256, 15))]
+
+def get_gray_scale_color(percentage: float) -> str:
+    if percentage < 0 or percentage > 1:
+        raise ValueError("percentage must be between 0 and 1")
+
+    value = int((1 - percentage) * 255)
+    return f"#{value:02x}{value:02x}{value:02x}"
+
+
+# GRAY_SCALES = [f"#{x:02x}{x:02x}{x:02x}" for x in reversed(range(0, 256, 15))]

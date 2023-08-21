@@ -1,122 +1,225 @@
+import asyncio
 import datetime as dtm
-import re
-from abc import ABC, abstractmethod
-from collections.abc import Collection
-from typing import TypeVar
+import logging
+from collections import defaultdict
+from collections.abc import Collection, Iterator
+from types import MappingProxyType, TracebackType
+from typing import Literal
 
-from holidayexcel.enums import StateCode
+from holidayexcel.enums import CountryCode
+from holidayexcel.enums import HolidayType as EnumHolidayType
+from holidayexcel.getdata import get_all_holidays_by_date, get_countries, get_subdivisions
+from holidayexcel.openholidaysapi import CountryResponse, HolidayType, SubdivisionResponse
+from holidayexcel.utils.collections import scn_to_set
+from holidayexcel.utils.datetime import date_range
 
-_T = TypeVar("_T")
+_LOGGER = logging.getLogger(__name__)
 
 
-class BaseHoliday(ABC):
-    def __init__(self, start_date: dtm.date, end_date: dtm.date, state_code: StateCode):
-        self._start_date: dtm.date = start_date
-        self._end_date: dtm.date = end_date
-        self._state_code: StateCode = state_code
-        self._years: Collection[int] = set(range(start_date.year, end_date.year + 1))
-
-    @property
-    def start_date(self) -> dtm.date:
-        return self._start_date
-
-    @property
-    def end_date(self) -> dtm.date:
-        return self._end_date
+class HolidayDate:
+    def __init__(self, date: dtm.date):
+        self._date = date
+        self._country_codes: dict[CountryCode, set[SubdivisionResponse] | Literal[True]] = {}
+        self._holiday_type: dict[str, set[EnumHolidayType]] = defaultdict(set)
 
     @property
-    def state_code(self) -> StateCode:
-        return self._state_code
+    def date(self) -> dtm.date:
+        return self._date
 
     @property
-    def years(self) -> Collection[int]:
-        return self._years
+    def year(self) -> int:
+        return self._date.year
 
     @property
-    @abstractmethod
-    def description(self) -> str:
-        ...
+    def month(self) -> int:
+        return self._date.month
 
-    @classmethod
-    @abstractmethod
-    def de_json(cls: type[_T], data: dict[str, str]) -> _T:
-        ...
+    @property
+    def day(self) -> int:
+        return self._date.day
 
-    def __repr__(self) -> str:
+    @property
+    def country_codes(
+        self,
+    ) -> MappingProxyType[CountryCode, set[SubdivisionResponse] | Literal[True]]:
+        return MappingProxyType(self._country_codes)
+
+    @property
+    def holiday_type(self) -> MappingProxyType[str, set[EnumHolidayType]]:
+        return MappingProxyType(self._holiday_type)
+
+    def add_country_code(
+        self,
+        country_code: CountryCode,
+        *,
+        subdivisions: SubdivisionResponse | Collection[SubdivisionResponse] | None = None,
+        nation_wide: Literal[True] | None = None,
+    ) -> None:
+        if not (subdivisions is None) ^ (nation_wide is False):
+            raise ValueError("Either subdivisions xor nation_wide must be specified.")
+        if nation_wide is True:
+            self._country_codes[country_code] = True
+            return
+
+        if (entry := self._country_codes.get(country_code, set())) is True:
+            _LOGGER.debug(
+                "Holiday is already nation wide for %s. Subdivisions will be ignored.",
+                country_code,
+            )
+            return
+
+        effective_subdivisions = scn_to_set(subdivisions)
+        self._country_codes[country_code] = entry | effective_subdivisions
+
+    def add_holiday_type(self, subdivision_code: str, holiday_type: EnumHolidayType) -> None:
+        self._holiday_type[subdivision_code].add(holiday_type)
+
+    def get_count_for_country(self, country_code: CountryCode, number_of_subdivisions: int) -> int:
+        if (entry := self._country_codes.get(country_code, set())) is True:
+            return number_of_subdivisions
+
+        return len(entry)
+
+    def get_percentage_for_country(
+        self, country_code: CountryCode, number_of_subdivisions: int
+    ) -> float:
         return (
-            f"{self.__class__.__name__}(start_date={self.start_date}, "
-            f"end_date={self.end_date}, state_code={self.state_code}), "
-            f"description={self.description!r})"
+            self.get_count_for_country(country_code, number_of_subdivisions)
+            / number_of_subdivisions
         )
 
 
-class SchoolHoliday(BaseHoliday):
+class HolidayYear:
     def __init__(
-        self, start_date: dtm.date, end_date: dtm.date, state_code: StateCode, name: str, slug: str
+        self, year: int, country_code: CountryCode | Collection[CountryCode] = CountryCode.GERMANY
     ):
-        super().__init__(start_date, end_date, state_code)
-        self._name: str = name
-        self._slug: str = slug
+        self._year = year
+        self._dates: dict[dtm.date, HolidayDate] = {}
+        self._country_codes: set[CountryCode] = scn_to_set(country_code)
+        self._subdivisions: dict[CountryCode, dict[str, SubdivisionResponse]] = defaultdict(dict)
+        self._country_code_mapping: dict[CountryCode, CountryResponse] = {}
 
-    @property
-    def description(self) -> str:
-        return self._name
-
-    @property
-    def slug(self) -> str:
-        return self._slug
-
-    @staticmethod
-    def _prettify_name(name: str, state_code: StateCode) -> str:
-        if "beweglicher ferientag" in name.lower():
-            return "Brückentag"
-
-        pattern = re.compile(rf"(\w+) {state_code.state_name.lower()} \d+")
-        return pattern.sub(r"\1", name).title()
-
-    @classmethod
-    def de_json(cls, data: dict[str, str]) -> "SchoolHoliday":
-        # Don't change in-place
-        data = data.copy()
-
-        state_code = StateCode(data["stateCode"])
-        return cls(
-            start_date=dtm.date.fromisoformat(data["start"]),
-            end_date=dtm.date.fromisoformat(data["end"]),
-            state_code=state_code,
-            name=cls._prettify_name(data["name"], state_code),
-            slug=data["slug"],
+    async def initialize(self) -> None:
+        await asyncio.gather(
+            *(self._get_subdivisions(country_code) for country_code in self._country_codes),
+            self._get_countries(),
         )
 
-
-class PublicHoliday(BaseHoliday):
-    def __init__(self, date: dtm.date, state_code: StateCode, name: str, hint: str):
-        super().__init__(start_date=date, end_date=date, state_code=state_code)
-        self._name: str = name
-        self._hint: str = hint
-
-    @property
-    def description(self) -> str:
-        return self._name
-
-    @property
-    def hint(self) -> str:
-        return self._hint
-
-    @classmethod
-    def de_json(
-        cls,
-        data: dict[str, str],
-        name: str | None = None,
-        state_code: str | StateCode | None = None,
-    ) -> "PublicHoliday":
-        if name is None or state_code is None:
-            raise ValueError("Missing required arguments `name` or `state_code`")
-
-        state_code = StateCode(state_code)
-        return cls(
-            state_code=state_code,
-            date=dtm.date.fromisoformat(data["datum"]),
-            hint=data["hinweis"],
-            name=name,
+        days_in_year = tuple(date_range(dtm.date(self._year, 1, 1), dtm.date(self._year, 12, 31)))
+        holiday_by_date_responses = await asyncio.gather(
+            *(
+                get_all_holidays_by_date(date=date, country_code=self._country_codes)
+                for date in days_in_year
+            )
         )
+        for date in days_in_year:
+            self._dates[date] = HolidayDate(date)
+
+        for number, date in enumerate(days_in_year):
+            for holiday_by_date_response in holiday_by_date_responses[number]:
+                country_code = CountryCode(holiday_by_date_response.country.iso_code)
+                subdivisions = (
+                    {
+                        self._subdivisions[country_code][subdivision_ref.code]
+                        for subdivision_ref in holiday_by_date_response.subdivisions
+                    }
+                    if holiday_by_date_response.subdivisions
+                    else None
+                )
+                self._dates[date].add_country_code(
+                    country_code,
+                    subdivisions=subdivisions,
+                    nation_wide=holiday_by_date_response.nationwide,
+                )
+                if holiday_by_date_response.type in (
+                    HolidayType.SCHOOL,
+                    HolidayType.BACK_TO_SCHOOL,
+                    HolidayType.END_OF_LESSONS,
+                ):
+                    for subdivision_ref in holiday_by_date_response.subdivisions:
+                        self._dates[date].add_holiday_type(
+                            subdivision_code=subdivision_ref.code,
+                            holiday_type=EnumHolidayType.SCHOOL,
+                        )
+                if holiday_by_date_response.type in (HolidayType.BANK, HolidayType.PUBLIC):
+                    for subdivision_ref in holiday_by_date_response.subdivisions:
+                        self._dates[date].add_holiday_type(
+                            subdivision_code=subdivision_ref.code,
+                            holiday_type=EnumHolidayType.PUBLIC,
+                        )
+
+    async def _get_subdivisions(self, country_code: CountryCode) -> None:
+        def _parse_subdivisions(subdivisions: tuple[SubdivisionResponse, ...]) -> None:
+            for subdivision in subdivisions:
+                self._subdivisions[country_code][subdivision.code] = subdivision
+                if subdivision.children:
+                    _parse_subdivisions(subdivision.children)
+
+        results = await get_subdivisions(country_code)
+        _parse_subdivisions(results)
+
+    async def _get_countries(self) -> None:
+        results = await get_countries()
+        for country in results:
+            if country.iso_code in self._country_codes:
+                self._country_code_mapping[CountryCode(country.iso_code)] = country
+
+    async def shutdown(self) -> None:
+        pass
+
+    async def __aenter__(self: "HolidayYear") -> "HolidayYear":
+        try:
+            await self.initialize()
+            return self
+        except Exception as exc:
+            await self.shutdown()
+            raise exc
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        # Make sure not to return `True` so that exceptions are not suppressed
+        # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
+        await self.shutdown()
+
+    def get_count_for_country_and_date(self, country_code: CountryCode, date: dtm.date) -> int:
+        return self._dates[date].get_count_for_country(
+            country_code,
+            len(self._subdivisions[country_code]),
+        )
+
+    def get_percentage_for_country_and_date(
+        self, country_code: CountryCode, date: dtm.date
+    ) -> float:
+        return self._dates[date].get_percentage_for_country(
+            country_code,
+            len(self._subdivisions[country_code]),
+        )
+
+    def day(self, date: dtm.date) -> HolidayDate:
+        return self._dates[date]
+
+    @property
+    def subdivisions(
+        self,
+    ) -> MappingProxyType[CountryCode, MappingProxyType[str, SubdivisionResponse]]:
+        return MappingProxyType(
+            {
+                country_code: MappingProxyType(subdivisions)
+                for country_code, subdivisions in self._subdivisions.items()
+            }
+        )
+
+    @property
+    def country_codes(self) -> MappingProxyType[CountryCode, CountryResponse]:
+        return MappingProxyType(self._country_code_mapping)
+
+    @property
+    def year(self) -> int:
+        return self._year
+
+    def iter(self) -> Iterator[HolidayDate]:
+        return iter(self._dates.values())
