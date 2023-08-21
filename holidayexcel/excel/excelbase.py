@@ -1,21 +1,31 @@
 import locale
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from functools import lru_cache
 from pathlib import Path
 from types import TracebackType
-from typing import Literal, Self
+from typing import Self
 
 from xlsxwriter import Workbook
 from xlsxwriter.format import Format
 from xlsxwriter.worksheet import Worksheet
 
-from holidayexcel.colors import get_gray_scale_color
-from holidayexcel.enums import CountryCode
+from holidayexcel.colors import BATLOW_S_HEX, get_gray_scale_color
 from holidayexcel.holidays import HolidayDate, HolidayYear
-from holidayexcel.openholidaysapi import SubdivisionResponse
+
+_MONTH_FORMAT = {
+    "bold": 1,
+    "border": 1,
+    "align": "center",
+    "valign": "vcenter",
+    "fg_color": "white",
+}
 
 
 class ExcelBase(ABC):
+    SCHOOL_HOLIDAY_COLOR = BATLOW_S_HEX[0]
+    PUBLIC_HOLIDAY_COLOR = BATLOW_S_HEX[1]
+    WEEKEND_COLOR = BATLOW_S_HEX[2]
+
     def __init__(
         self,
         holiday_year: HolidayYear,
@@ -23,6 +33,7 @@ class ExcelBase(ABC):
         path: Path | None = None,
         workbook: Workbook | None = None,
         worksheet_name: str | None = None,
+        close: bool = True,
     ) -> None:
         if not (path is None) ^ (workbook is None):
             raise ValueError("Either path xor workbook must be passed.")
@@ -32,13 +43,29 @@ class ExcelBase(ABC):
         self._workbook: Workbook = workbook or Workbook(str(self._path))
         self._worksheet = self.workbook.add_worksheet(name=worksheet_name)
         self._gray_scale_format: dict[str, Format] = {}
+        self._close = close
+
+        # formats
+        self._cached_formats: dict[dict[str, str | int], Format] = {}
+        self._month_format = self.workbook.add_format(_MONTH_FORMAT)
+
+    @lru_cache(maxsize=256)  # noqa: B019
+    def _get_format(self, parameters: tuple[tuple[str, str | int]]) -> Format:
+        format_ = self.workbook.add_format()
+        for key, value in parameters:
+            setattr(format_, key, value)
+        return format_
+
+    def get_format(self, parameters: dict[str, str | int]) -> Format:
+        return self._get_format(tuple(parameters.items()))
 
     def initialize(self) -> None:
         self.path.unlink(missing_ok=True)
         locale.setlocale(locale.LC_ALL, "de_DE.UTF-8")
 
     def shutdown(self) -> None:
-        self._workbook.close()
+        if self._close:
+            self._workbook.close()
 
     def __enter__(self: Self) -> Self:
         try:
@@ -58,31 +85,12 @@ class ExcelBase(ABC):
         # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
         self.shutdown()
 
-    @abstractmethod
-    def write_weekend_day(self, column: int) -> None:
-        pass
-
-    @abstractmethod
-    def write_holiday_date_germany(
-        self,
-        holiday_date: HolidayDate,
-        column: int,
-        subdivisions: Literal[True] | Collection[SubdivisionResponse],
-    ) -> None:
-        pass
-
     def _get_gray_scale_format(self, percentage: float) -> Format:
         colour = get_gray_scale_color(percentage)
         if colour not in self._gray_scale_format:
             cell_format = self.workbook.add_format({"fg_color": colour, "font_color": "white"})
             self._gray_scale_format[colour] = cell_format
         return self._gray_scale_format[colour]
-
-    @abstractmethod
-    def write_holiday_date_foreign(
-        self, column: int, country_code: CountryCode, holiday_date: HolidayDate
-    ) -> None:
-        pass
 
     @abstractmethod
     def write_holiday_date(self, holiday_date: HolidayDate) -> None:
@@ -109,13 +117,13 @@ class ExcelBase(ABC):
     def write_division_names(self) -> None:
         pass
 
-    @abstractmethod
-    def write_holiday_count_germany(self) -> None:
-        pass
-
-    @abstractmethod
     def write_year(self) -> None:
-        pass
+        # Order matters here, because we overwrite the cells in each call
+        self.write_division_names()
+        self.write_month_names()
+        self.write_day_numbers()
+        self.write_week_numbers()
+        self.write_holiday_dates()
 
     @property
     def workbook(self) -> Workbook:

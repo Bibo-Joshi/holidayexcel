@@ -1,3 +1,3 @@
-__all__ = ["YearCalendar"]
+__all__ = ["YearOverview"]
 
-from .yearcalendar import YearCalendar
+from .yearoverview import YearOverview

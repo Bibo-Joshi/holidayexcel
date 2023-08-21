@@ -13,6 +13,10 @@ def date_range(
         yield start_date + dtm.timedelta(number)
 
 
+def year_range(year: int) -> Iterable[dtm.date]:
+    return date_range(dtm.date(year, 1, 1), dtm.date(year, 12, 31))
+
+
 def day_of_year(date: dtm.date) -> int:
     return int(date.strftime("%j"))
 
