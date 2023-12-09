@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CountryReference(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
-    iso_code: str = Field(..., alias="isoCode", example="DE", min_length=1)
+    iso_code: str = Field(..., alias="isoCode", examples=["DE"], min_length=1)
     """
     Country ISO code
     """
@@ -53,11 +53,11 @@ class StatisticsResponse(BaseModel):
 
 class SubdivisionReference(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
-    code: str = Field(..., example="DE-BE", min_length=1)
+    code: str = Field(..., examples=["DE-BE"], min_length=1)
     """
     Subdivision code
     """
-    short_name: str = Field(..., alias="shortName", example="BE", min_length=1)
+    short_name: str = Field(..., alias="shortName", examples=["BE"], min_length=1)
     """
     Short name for display
     """
@@ -67,7 +67,7 @@ class SubdivisionResponse(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
     category: tuple[LocalizedText, ...] = Field(
         ...,
-        example=[
+        examples=[
             {"language": "DE", "text": "Bundesland"},
             {"language": "EN", "text": "Federal state"},
         ],
@@ -79,7 +79,7 @@ class SubdivisionResponse(BaseModel):
     """
     Child subdivisions
     """
-    code: str = Field(..., example="DE-BE", min_length=1)
+    code: str = Field(..., examples=["DE-BE"], min_length=1)
     """
     Subdivision code
     """
@@ -87,12 +87,12 @@ class SubdivisionResponse(BaseModel):
     """
     Localized comments of the subdivision
     """
-    iso_code: str | None = Field(None, alias="isoCode", example="DE-BE")
+    iso_code: str | None = Field(None, alias="isoCode", examples=["DE-BE"])
     """
     ISO 3166-2 subdivision code (if defined)
     """
     name: tuple[LocalizedText, ...] = Field(
-        ..., example=[{"language": "DE", "text": "Berlin"}, {"language": "EN", "text": "Berlin"}]
+        ..., examples=[{"language": "DE", "text": "Berlin"}, {"language": "EN", "text": "Berlin"}]
     )
     """
     Localized names of the subdivision
@@ -101,7 +101,7 @@ class SubdivisionResponse(BaseModel):
     """
     Official languages as ISO-639-1 codes
     """
-    short_name: str = Field(..., alias="shortName", example="BE", min_length=1)
+    short_name: str = Field(..., alias="shortName", examples=["BE"], min_length=1)
     """
     Short name for display
     """
@@ -120,18 +120,21 @@ class SubdivisionResponse(BaseModel):
 
 class CountryResponse(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
-    iso_code: str = Field(..., alias="isoCode", example="DE", min_length=1)
+    iso_code: str = Field(..., alias="isoCode", examples=["DE"], min_length=1)
     """
     ISO 3166-1 country code
     """
     name: tuple[LocalizedText, ...] = Field(
         ...,
-        example=[{"language": "EN", "text": "Germany"}, {"language": "DE", "text": "Deutschland"}],
+        examples=[
+            {"language": "EN", "text": "Germany"},
+            {"language": "DE", "text": "Deutschland"},
+        ],
     )
     """
     Localized country names
     """
-    official_languages: tuple[str, ...] = Field(..., alias="officialLanguages", example=["DE"])
+    official_languages: tuple[str, ...] = Field(..., alias="officialLanguages", examples=["DE"])
     """
     Official ISO-639-1 language codes
     """
@@ -150,7 +153,7 @@ class HolidayByDateResponse(BaseModel):
     Additional localized comments
     """
     country: CountryReference
-    id: UUID = Field(..., example="ff3b77a3-8c31-47af-b1c7-f26dd51f3c19")
+    id: UUID = Field(..., examples=["ff3b77a3-8c31-47af-b1c7-f26dd51f3c19"])
     """
     Unqiue holiday id
     """
@@ -158,7 +161,7 @@ class HolidayByDateResponse(BaseModel):
     """
     Localized names of the holiday
     """
-    nationwide: bool = Field(..., example=True)
+    nationwide: bool = Field(..., examples=[True])
     """
     Is the holiday nationwide?
     """
@@ -175,11 +178,11 @@ class HolidayResponse(BaseModel):
     """
     Additional localized comments
     """
-    end_date: date = Field(..., alias="endDate", example="2022-12-31")
+    end_date: date = Field(..., alias="endDate", examples=["2022-12-31"])
     """
     End date of the holiday
     """
-    id: UUID = Field(..., example="ff3b77a3-8c31-47af-b1c7-f26dd51f3c19")
+    id: UUID = Field(..., examples=["ff3b77a3-8c31-47af-b1c7-f26dd51f3c19"])
     """
     Unqiue holiday id
     """
@@ -187,11 +190,11 @@ class HolidayResponse(BaseModel):
     """
     Localized names of the holiday
     """
-    nationwide: bool = Field(..., example=True)
+    nationwide: bool = Field(..., examples=[True])
     """
     Is the holiday nationwide?
     """
-    start_date: date = Field(..., alias="startDate", example="2022-01-01")
+    start_date: date = Field(..., alias="startDate", examples=["2022-01-01"])
     """
     Start date of the holiday
     """
@@ -204,12 +207,12 @@ class HolidayResponse(BaseModel):
 
 class LanguageResponse(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
-    iso_code: str = Field(..., alias="isoCode", example="DE", min_length=1)
+    iso_code: str = Field(..., alias="isoCode", examples=["DE"], min_length=1)
     """
     ISO-639-1 language code
     """
     name: tuple[LocalizedText, ...] = Field(
-        ..., example=[{"language": "DE", "text": "Deutsch"}, {"language": "EN", "text": "German"}]
+        ..., examples=[{"language": "DE", "text": "Deutsch"}, {"language": "EN", "text": "German"}]
     )
     """
     Localized language names
